@@ -16,6 +16,7 @@ from src.okx_client import OKXSpotReadOnlyClient
 
 
 ProgressFn = Callable[[int, int, str], None]
+Notice = dict[str, object]
 NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000
 THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
 
@@ -60,12 +61,18 @@ def _apply_retention_limit(
     *,
     retention_ms: int,
     label: str,
-) -> tuple[int, int | None, list[str]]:
-    notices: list[str] = []
+) -> tuple[int, int | None, list[Notice]]:
+    notices: list[Notice] = []
     cutoff = _now_ms() - retention_ms
     effective_start = max(start_ms, cutoff)
     if effective_start > start_ms:
-        notices.append(f"{label} 只支持近 {retention_ms // 86_400_000} 天成交，已自动截断更早时间。")
+        notices.append(
+            {
+                "kind": "retention_limit",
+                "exchange_label": label,
+                "days": retention_ms // 86_400_000,
+            }
+        )
     return effective_start, end_ms, notices
 
 
@@ -279,7 +286,7 @@ def fetch_binance_fills(
     start_ms: int,
     end_ms: int | None,
     progress: ProgressFn | None = None,
-) -> tuple[pd.DataFrame, list[str], list[str]]:
+) -> tuple[pd.DataFrame, list[str], list[Notice]]:
     metas = _binance_symbol_metas(client.get_exchange_info())
     selected, unresolved = match_symbol_metas(metas, manual_symbols)
     records: list[dict] = []
@@ -330,7 +337,7 @@ def fetch_okx_fills(
     start_ms: int,
     end_ms: int | None,
     progress: ProgressFn | None = None,
-) -> tuple[pd.DataFrame, list[str], list[str]]:
+) -> tuple[pd.DataFrame, list[str], list[Notice]]:
     effective_start, effective_end, notices = _apply_retention_limit(
         start_ms,
         end_ms,
@@ -389,7 +396,7 @@ def fetch_bitget_fills(
     start_ms: int,
     end_ms: int | None,
     progress: ProgressFn | None = None,
-) -> tuple[pd.DataFrame, list[str], list[str]]:
+) -> tuple[pd.DataFrame, list[str], list[Notice]]:
     effective_start, effective_end, notices = _apply_retention_limit(
         start_ms,
         end_ms,
@@ -447,7 +454,7 @@ def fetch_gate_fills(
     start_ms: int,
     end_ms: int | None,
     progress: ProgressFn | None = None,
-) -> tuple[pd.DataFrame, list[str], list[str]]:
+) -> tuple[pd.DataFrame, list[str], list[Notice]]:
     effective_end = end_ms if end_ms is not None else _now_ms()
     metas = _gate_symbol_metas(client.get_currency_pairs())
     selected, unresolved = match_symbol_metas(metas, manual_symbols)

@@ -9,5 +9,8 @@ font = "sans serif"
 [server]
 runOnSave = true
 
+[client]
+toolbarMode = "minimal"
+
 [browser]
 gatherUsageStats = false

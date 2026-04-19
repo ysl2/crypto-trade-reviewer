@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import date
 from pathlib import Path
@@ -8,18 +9,22 @@ from typing import Any
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from plotly.subplots import make_subplots
 
 from src.analytics import (
     TIME_BUCKETS,
-    beijing_date_bounds,
     build_cumulative_position_series,
     build_trade_scatter_frame,
+    current_local_date,
+    display_timezone_name,
+    local_date_bounds,
 )
 from src.binance_client import BinanceSpotReadOnlyClient
 from src.bitget_client import BitgetSpotReadOnlyClient
 from src.exchange_importers import (
+    Notice,
     fetch_binance_fills,
     fetch_bitget_fills,
     fetch_gate_fills,
@@ -33,6 +38,7 @@ from src.market_utils import (
     market_key_to_binance_symbol,
     split_market_key,
 )
+from src.i18n import LANGUAGE_OPTIONS, get_language_name, interval_label, resolve_ui_locale, t
 from src.okx_client import OKXSpotReadOnlyClient
 from src.storage import TradeRepository
 
@@ -40,7 +46,7 @@ from src.storage import TradeRepository
 load_dotenv()
 
 st.set_page_config(
-    page_title="成交复盘",
+    page_title="Trade Review",
     page_icon="📊",
     layout="wide",
 )
@@ -57,15 +63,11 @@ BINANCE_BASE_URL = os.getenv("BINANCE_BASE_URL", "https://api.binance.com")
 OKX_BASE_URL = os.getenv("OKX_BASE_URL", "https://www.okx.com")
 BITGET_BASE_URL = os.getenv("BITGET_BASE_URL", "https://api.bitget.com")
 GATE_BASE_URL = os.getenv("GATE_BASE_URL", "https://api.gateio.ws/api/v4")
-
-INTERVAL_LABELS = {
-    "1h": "1小时",
-    "4h": "4小时",
-    "1d": "1天",
-    "1w": "1周",
-    "1M": "1月",
-    "1y": "1年",
-}
+FLOW_STATES = (
+    ("净流入", "chart.flow.net_in", BUY_COLOR),
+    ("净流出", "chart.flow.net_out", SELL_COLOR),
+    ("净零", "chart.flow.net_flat", NEUTRAL_COLOR),
+)
 
 IMPORT_CONFIGS = [
     {
@@ -123,6 +125,76 @@ IMPORT_CONFIGS = [
 ]
 
 
+def build_flash_message_text(locale: str, payload: object) -> str:
+    if isinstance(payload, dict) and payload.get("kind") == "import_complete":
+        return t(
+            locale,
+            "flash.import_complete",
+            exchange=payload.get("exchange_label", ""),
+            inserted=payload.get("inserted", 0),
+            skipped=payload.get("skipped", 0),
+        )
+    if isinstance(payload, str):
+        return payload
+    return ""
+
+
+def build_notice_text(locale: str, notice: object) -> str:
+    if isinstance(notice, dict):
+        kind = notice.get("kind")
+        if kind == "retention_limit":
+            return t(
+                locale,
+                "notice.retention_limit",
+                exchange=notice.get("exchange_label", ""),
+                days=notice.get("days", 0),
+            )
+        if kind == "unresolved_symbols":
+            symbols = notice.get("symbols", [])
+            rendered_symbols = ", ".join(str(symbol) for symbol in symbols)
+            return t(locale, "notice.unresolved_symbols", symbols=rendered_symbols)
+    if isinstance(notice, str):
+        return notice
+    return ""
+
+
+def get_query_param_locale() -> str | None:
+    locale = st.query_params.get("lang")
+    if isinstance(locale, list):
+        return locale[0] if locale else None
+    if isinstance(locale, str) and locale.strip():
+        return locale
+    return None
+
+
+def sync_query_param_locale(locale: str) -> None:
+    if get_query_param_locale() != locale:
+        st.query_params["lang"] = locale
+
+
+def sync_browser_tab_title(locale: str) -> None:
+    page_title = t(locale, "app.page_title")
+    escaped_title = json.dumps(page_title)
+    components.html(
+        f"""
+        <script>
+        const nextTitle = {escaped_title};
+        document.title = nextTitle;
+        try {{
+          window.parent.document.title = nextTitle;
+        }} catch (error) {{
+        }}
+        </script>
+        """,
+        height=0,
+        width=0,
+    )
+
+
+def get_browser_timezone_name() -> str | None:
+    return getattr(st.context, "timezone", None)
+
+
 def get_repository() -> TradeRepository:
     return TradeRepository(DB_PATH)
 
@@ -142,7 +214,7 @@ def load_public_symbol_price(symbol: str, base_url: str) -> float:
     return float(payload["price"])
 
 
-def load_live_price_status(market_key: str) -> tuple[float | None, str]:
+def load_live_price_status(locale: str, market_key: str) -> tuple[float | None, str]:
     current_price: float | None = None
     price_fetch_error = ""
     binance_symbol = market_key_to_binance_symbol(market_key)
@@ -153,12 +225,12 @@ def load_live_price_status(market_key: str) -> tuple[float | None, str]:
         price_fetch_error = str(exc)
 
     live_status = (
-        f"{market_key} Binance 参考价 {current_price:,.4f}。"
+        t(locale, "live_price.available", market_key=market_key, current_price=current_price)
         if current_price is not None
-        else f"{market_key} 当前价暂时不可用。"
+        else t(locale, "live_price.unavailable", market_key=market_key)
     )
     if price_fetch_error:
-        live_status = f"{live_status} 获取失败原因：{price_fetch_error}"
+        live_status = f"{live_status} {t(locale, 'live_price.failure_reason', message=price_fetch_error)}"
     return current_price, live_status
 
 
@@ -169,6 +241,8 @@ def build_trade_figure(
     market_key: str,
     base_asset: str,
     price_unit: str,
+    locale: str,
+    timezone_name: str | None,
     current_price: float | None = None,
 ) -> go.Figure:
     fig = make_subplots(
@@ -179,11 +253,38 @@ def build_trade_figure(
         row_heights=[0.7, 0.3],
     )
 
-    for flow_state, color, label in (
-        ("净流入", BUY_COLOR, "净流入"),
-        ("净流出", SELL_COLOR, "净流出"),
-        ("净零", NEUTRAL_COLOR, "净零"),
-    ):
+    scatter_hover_template = (
+        f"{t(locale, 'chart.hover.bucket')}: "
+        "%{customdata[0]}<br>"
+        f"{t(locale, 'chart.hover.price')}: "
+        "%{customdata[1]:,.8f}<br>"
+        f"{t(locale, 'chart.hover.price_range')}: "
+        "%{customdata[2]:,.8f} - %{customdata[3]:,.8f}<br>"
+        f"{t(locale, 'chart.hover.buy_qty')}: "
+        "%{customdata[4]:.8f}<br>"
+        f"{t(locale, 'chart.hover.sell_qty')}: "
+        "%{customdata[5]:.8f}<br>"
+        f"{t(locale, 'chart.hover.net_change')}: "
+        "%{customdata[6]:.8f}<br>"
+        f"{t(locale, 'chart.hover.trade_count')}: "
+        "%{customdata[7]}<br>"
+        f"{t(locale, 'chart.hover.exchange_sources')}: "
+        "%{customdata[8]}<extra></extra>"
+    )
+    position_hover_template = (
+        f"{t(locale, 'chart.hover.bucket')}: "
+        "%{customdata[0]}<br>"
+        f"{t(locale, 'chart.hover.trade_count')}: "
+        "%{customdata[1]}<br>"
+        f"{t(locale, 'chart.hover.net_change')}: "
+        "%{customdata[2]:.8f}<br>"
+        f"{t(locale, 'chart.hover.cumulative_qty')}: "
+        "%{customdata[3]:.8f}<br>"
+        f"{t(locale, 'chart.hover.exchange_sources')}: "
+        "%{customdata[4]}<extra></extra>"
+    )
+
+    for flow_state, label_key, color in FLOW_STATES:
         flow_df = scatter_df.loc[scatter_df["flow_state"] == flow_state]
         if flow_df.empty:
             continue
@@ -206,7 +307,7 @@ def build_trade_figure(
                 x=flow_df["executed_at_plot"],
                 y=flow_df["price"],
                 mode="markers",
-                name=label,
+                name=t(locale, label_key),
                 marker={
                     "size": flow_df["marker_size"],
                     "color": color,
@@ -214,16 +315,7 @@ def build_trade_figure(
                     "line": {"width": 0},
                 },
                 customdata=customdata,
-                hovertemplate=(
-                    "时间桶: %{customdata[0]}<br>"
-                    "价格: %{customdata[1]:,.8f}<br>"
-                    "价格范围: %{customdata[2]:,.8f} - %{customdata[3]:,.8f}<br>"
-                    "买入总量: %{customdata[4]:.8f}<br>"
-                    "卖出总量: %{customdata[5]:.8f}<br>"
-                    "净变化: %{customdata[6]:.8f}<br>"
-                    "合并成交数: %{customdata[7]}<br>"
-                    "交易所来源: %{customdata[8]}<extra></extra>"
-                ),
+                hovertemplate=scatter_hover_template,
             ),
             row=1,
             col=1,
@@ -235,7 +327,7 @@ def build_trade_figure(
                 x=position_df["executed_at_plot"],
                 y=position_df["cumulative_base_qty"],
                 mode="lines+markers",
-                name=f"累计 {base_asset}",
+                name=t(locale, "chart.position_series", base_asset=base_asset),
                 line={"color": "#1d4ed8", "width": 2.2},
                 marker={"size": 7, "color": "#1d4ed8"},
                 customdata=list(
@@ -247,26 +339,31 @@ def build_trade_figure(
                         position_df["exchange_summary"],
                     )
                 ),
-                hovertemplate=(
-                    "时间桶: %{customdata[0]}<br>"
-                    "合并成交数: %{customdata[1]}<br>"
-                    "净变化: %{customdata[2]:.8f}<br>"
-                    "累计数量: %{customdata[3]:.8f}<br>"
-                    "交易所来源: %{customdata[4]}<extra></extra>"
-                ),
+                hovertemplate=position_hover_template,
             ),
             row=2,
             col=1,
         )
 
     fig.update_layout(
-        title=f"{market_key} 成交主图",
+        title={
+            "text": t(locale, "chart.title", market_key=market_key),
+            "x": 0.0,
+            "xanchor": "left",
+            "font": {"size": 16},
+        },
         paper_bgcolor="rgba(255,255,255,0.55)",
         plot_bgcolor="rgba(255,255,255,0.55)",
         font_color=INK,
         hovermode="x unified",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
-        margin=dict(l=20, r=20, t=68, b=20),
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.06,
+            "x": 0,
+            "font": {"size": 11},
+        },
+        margin=dict(l=20, r=20, t=96, b=20),
         height=780,
     )
     if current_price is not None:
@@ -277,20 +374,25 @@ def build_trade_figure(
             line_dash="dash",
             line_color="#111827",
             line_width=1.8,
-            annotation_text=f"Binance 参考价 {current_price:,.4f}",
+            annotation_text=t(locale, "chart.current_price_line", current_price=current_price),
             annotation_position="top left",
         )
     fig.update_xaxes(showgrid=False, row=1, col=1)
-    fig.update_xaxes(showgrid=False, title_text="时间（北京时间）", row=2, col=1)
+    fig.update_xaxes(
+        showgrid=False,
+        title_text=t(locale, "chart.xaxis.time", timezone_name=display_timezone_name(timezone_name)),
+        row=2,
+        col=1,
+    )
     fig.update_yaxes(
-        title_text=f"价格 ({price_unit})",
+        title_text=t(locale, "chart.yaxis.price", price_unit=price_unit),
         gridcolor="rgba(16,42,67,0.08)",
         zeroline=False,
         row=1,
         col=1,
     )
     fig.update_yaxes(
-        title_text=f"累计 {base_asset}",
+        title_text=t(locale, "chart.yaxis.cumulative", base_asset=base_asset),
         gridcolor="rgba(16,42,67,0.08)",
         zeroline=True,
         zerolinecolor="rgba(16,42,67,0.12)",
@@ -300,10 +402,11 @@ def build_trade_figure(
     return fig
 
 
-def render_import_tab(config: dict[str, Any]) -> None:
+def render_import_tab(config: dict[str, Any], *, locale: str) -> None:
     key_prefix = config["id"]
     label = config["label"]
     left, right = st.columns([1.25, 1.75])
+    browser_timezone_name = get_browser_timezone_name()
 
     with left:
         api_key = st.text_input(
@@ -327,46 +430,51 @@ def render_import_tab(config: dict[str, Any]) -> None:
                 key=f"{key_prefix}_passphrase",
             )
         base_url = st.text_input(
-            "API Base URL",
+            t(locale, "field.api_base_url"),
             value=os.getenv(config["base_url_env"], config["default_base_url"]),
             key=f"{key_prefix}_base_url",
         )
         account_label = st.text_input(
-            "账户标签",
+            t(locale, "field.account_label"),
             value=config["default_account_label"],
             key=f"{key_prefix}_account_label",
         )
 
     with right:
         market_pairs = st.text_area(
-            "交易对",
+            t(locale, "field.market_pairs"),
             value="BTCUSDT ETHUSDT SOLUSDT",
-            help="支持 BTCUSDT、BTC/USDT、BTC-USDT、BTC_USDT 这几种写法；多个交易对用空格、逗号或换行分隔。",
+            help=t(locale, "field.market_pairs.help"),
             key=f"{key_prefix}_market_pairs",
         )
         import_start_date = st.date_input(
-            "开始日期",
+            t(locale, "field.start_date"),
             value=date(2017, 1, 1),
             key=f"{key_prefix}_start_date",
         )
         import_end_date = st.date_input(
-            "结束日期",
-            value=date.today(),
+            t(locale, "field.end_date"),
+            value=current_local_date(browser_timezone_name),
             key=f"{key_prefix}_end_date",
         )
 
-    if st.button(f"导入 {label} 实际成交", type="primary", width="stretch", key=f"import_{key_prefix}"):
+    if st.button(
+        t(locale, "button.import_fills", exchange=label),
+        type="primary",
+        width="stretch",
+        key=f"import_{key_prefix}",
+    ):
         if not api_key or not api_secret:
-            st.error(f"请提供 {label} API Key 和 Secret。")
+            st.error(t(locale, "error.api_credentials_required", exchange=label))
             return
         if config["needs_passphrase"] and not passphrase:
-            st.error(f"请提供 {label} Passphrase。")
+            st.error(t(locale, "error.passphrase_required", exchange=label))
             return
         if not market_pairs.strip():
-            st.error("请至少输入一个交易对。")
+            st.error(t(locale, "error.market_pairs_required"))
             return
         if import_start_date > import_end_date:
-            st.error("开始日期不能晚于结束日期。")
+            st.error(t(locale, "error.invalid_date_range"))
             return
 
         try:
@@ -378,11 +486,19 @@ def render_import_tab(config: dict[str, Any]) -> None:
             if config["needs_passphrase"]:
                 client_kwargs["passphrase"] = passphrase
             client = config["client_class"](**client_kwargs)
-            start_ms, end_ms = beijing_date_bounds(import_start_date, import_end_date)
-            progress_bar = st.progress(0, text=f"准备抓取 {label} 实际成交")
+            start_ms, end_ms = local_date_bounds(
+                import_start_date,
+                import_end_date,
+                timezone_name=browser_timezone_name,
+            )
+            progress_bar = st.progress(0, text=t(locale, "progress.preparing_import", exchange=label))
 
             def progress(current: int, total: int, message: str) -> None:
-                progress_bar.progress(int(100 * current / max(total, 1)), text=message)
+                del message
+                progress_bar.progress(
+                    int(100 * current / max(total, 1)),
+                    text=t(locale, "progress.importing", exchange=label, current=current, total=total),
+                )
 
             imported_fills, unresolved, notices = config["fetch_fn"](
                 client,
@@ -397,15 +513,20 @@ def render_import_tab(config: dict[str, Any]) -> None:
             inserted, skipped = get_repository().upsert_fills(imported_fills)
             refresh_state()
 
-            session_notices = list(notices)
+            session_notices: list[Notice | dict[str, object]] = list(notices)
             if unresolved:
-                session_notices.append(f"这些交易对未识别：{', '.join(unresolved)}")
+                session_notices.append({"kind": "unresolved_symbols", "symbols": unresolved})
 
-            st.session_state["flash_message"] = f"{label} 导入完成：新增 {inserted} 条，重复跳过 {skipped} 条。"
+            st.session_state["flash_message"] = {
+                "kind": "import_complete",
+                "exchange_label": label,
+                "inserted": inserted,
+                "skipped": skipped,
+            }
             st.session_state["flash_notices"] = session_notices
             st.rerun()
         except ExchangeAPIError as exc:
-            st.error(str(exc))
+            st.error(t(locale, "error.exchange_api", exchange=label, message=str(exc)))
         except Exception as exc:  # pragma: no cover
             st.exception(exc)
 
@@ -413,6 +534,11 @@ def render_import_tab(config: dict[str, Any]) -> None:
 st.markdown(
     """
     <style>
+    header[data-testid="stHeader"],
+    div[data-testid="stToolbar"],
+    div[data-testid="stDecoration"] {
+      display: none;
+    }
     [data-testid="stAppViewContainer"] {
       background:
         radial-gradient(circle at 10% 8%, rgba(15, 118, 110, 0.13), transparent 24%),
@@ -425,9 +551,9 @@ st.markdown(
     }
     .page-title {
       color: #0b2239;
-      font-size: 2.2rem;
+      font-size: clamp(1.85rem, 2.8vw, 2.45rem);
       line-height: 1.0;
-      margin-bottom: 1rem;
+      margin-bottom: 0.4rem;
       letter-spacing: -0.03em;
       font-weight: 700;
     }
@@ -436,40 +562,73 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown('<div class="page-title">成交复盘</div>', unsafe_allow_html=True)
-
-
 if "fills_df" not in st.session_state:
     st.session_state["fills_df"] = load_state()
 if "flash_message" not in st.session_state:
-    st.session_state["flash_message"] = ""
+    st.session_state["flash_message"] = None
 if "flash_notices" not in st.session_state:
     st.session_state["flash_notices"] = []
 
+if "ui_language" not in st.session_state:
+    st.session_state["ui_language"] = resolve_ui_locale(
+        get_query_param_locale(),
+        None,
+        st.context.locale,
+    )
+if "ui_language_selector" not in st.session_state:
+    st.session_state["ui_language_selector"] = st.session_state["ui_language"]
+
+active_locale = st.session_state["ui_language"]
+
+title_col, language_col = st.columns([6.0, 1.4])
+with title_col:
+    st.markdown(f'<div class="page-title">{t(active_locale, "app.title")}</div>', unsafe_allow_html=True)
+with language_col:
+    st.selectbox(
+        t(active_locale, "language.label"),
+        options=list(LANGUAGE_OPTIONS),
+        index=list(LANGUAGE_OPTIONS).index(st.session_state["ui_language_selector"]),
+        format_func=get_language_name,
+        key="ui_language_selector",
+    )
+
+selected_locale = st.session_state["ui_language_selector"]
+if selected_locale != st.session_state["ui_language"]:
+    st.session_state["ui_language"] = selected_locale
+    sync_query_param_locale(selected_locale)
+    st.rerun()
+
+active_locale = st.session_state["ui_language"]
+sync_query_param_locale(active_locale)
+sync_browser_tab_title(active_locale)
 
 fills_df = st.session_state["fills_df"]
 
-with st.expander("交易所 API 导入", expanded=fills_df.empty):
+with st.expander(t(active_locale, "section.import"), expanded=fills_df.empty):
     tabs = st.tabs([config["label"] for config in IMPORT_CONFIGS])
     for tab, config in zip(tabs, IMPORT_CONFIGS):
         with tab:
-            render_import_tab(config)
+            render_import_tab(config, locale=active_locale)
 
 
-flash_message = st.session_state.get("flash_message", "")
+flash_message = st.session_state.get("flash_message")
 if flash_message:
-    st.success(flash_message)
-    st.session_state["flash_message"] = ""
+    rendered_flash_message = build_flash_message_text(active_locale, flash_message)
+    if rendered_flash_message:
+        st.success(rendered_flash_message)
+    st.session_state["flash_message"] = None
 
 flash_notices = st.session_state.get("flash_notices", [])
 if flash_notices:
     for notice in flash_notices:
-        st.warning(notice)
+        rendered_notice = build_notice_text(active_locale, notice)
+        if rendered_notice:
+            st.warning(rendered_notice)
     st.session_state["flash_notices"] = []
 
 
 if fills_df.empty:
-    st.info("当前还没有实际成交数据。先在上方导入至少一个市场的历史成交。")
+    st.info(t(active_locale, "info.no_fills"))
 else:
     market_keys = list_market_keys(fills_df)
     selected_market_default = st.session_state.get("selected_market", market_keys[0])
@@ -478,43 +637,59 @@ else:
     controls_left, controls_right = st.columns([1.5, 1.2])
     with controls_left:
         selected_market = st.selectbox(
-            "市场",
+            t(active_locale, "field.market"),
             options=market_keys,
             index=selected_market_index,
             key="selected_market",
         )
     with controls_right:
         selected_interval = st.select_slider(
-            "时间粒度",
+            t(active_locale, "field.interval"),
             options=list(TIME_BUCKETS),
             value="1d",
-            format_func=lambda value: INTERVAL_LABELS[value],
+            format_func=lambda value: interval_label(active_locale, value),
         )
 
     market_fills = filter_fills_by_market(fills_df, selected_market)
     if market_fills.empty:
-        st.warning("当前市场还没有实际成交。")
+        st.warning(t(active_locale, "warning.no_market_fills"))
     else:
         base_asset, quote_asset = split_market_key(selected_market)
 
         st.caption(
-            f"这张图会把所有交易所里 `{selected_market}` 的真实成交混在一起。"
-            f"上面的散点按 {INTERVAL_LABELS[selected_interval]} 聚成净流向点，下面的折线显示 `{base_asset}` 的累计数量变化。"
+            t(
+                active_locale,
+                "caption.market_mix",
+                market_key=selected_market,
+                interval_label=interval_label(active_locale, selected_interval),
+                base_asset=base_asset,
+            )
         )
 
-        scatter_df = build_trade_scatter_frame(market_fills, interval=selected_interval)
-        position_df = build_cumulative_position_series(market_fills, interval=selected_interval)
+        browser_timezone_name = get_browser_timezone_name()
+        scatter_df = build_trade_scatter_frame(
+            market_fills,
+            interval=selected_interval,
+            timezone_name=browser_timezone_name,
+        )
+        position_df = build_cumulative_position_series(
+            market_fills,
+            interval=selected_interval,
+            timezone_name=browser_timezone_name,
+        )
 
         @st.fragment(run_every="30s")
         def render_live_chart() -> None:
-            current_price, live_status = load_live_price_status(selected_market)
-            st.caption(f"当前价格线优先使用 Binance 现货参考价，每 30 秒自动更新一次。{live_status}")
+            current_price, live_status = load_live_price_status(active_locale, selected_market)
+            st.caption(t(active_locale, "caption.live_price", live_status=live_status))
             fig = build_trade_figure(
                 scatter_df,
                 position_df,
                 market_key=selected_market,
                 base_asset=base_asset,
                 price_unit=quote_asset,
+                locale=active_locale,
+                timezone_name=browser_timezone_name,
                 current_price=current_price,
             )
             st.plotly_chart(

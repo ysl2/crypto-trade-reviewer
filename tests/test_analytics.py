@@ -3,9 +3,10 @@ from datetime import date
 import pandas as pd
 
 from src.analytics import (
-    beijing_date_bounds,
     build_cumulative_position_series,
     build_trade_scatter_frame,
+    display_timezone_name,
+    local_date_bounds,
 )
 from src.exchange_importers import (
     _normalize_bitget_fill,
@@ -128,10 +129,19 @@ def sample_fills() -> pd.DataFrame:
     )
 
 
-def test_beijing_date_bounds() -> None:
-    start_ms, end_ms = beijing_date_bounds(date(2025, 1, 1), date(2025, 1, 2))
+def test_local_date_bounds_uses_requested_timezone() -> None:
+    start_ms, end_ms = local_date_bounds(date(2025, 1, 1), date(2025, 1, 2), timezone_name="Asia/Shanghai")
     assert start_ms < end_ms
     assert end_ms - start_ms == 172_799_999
+
+    new_york_start_ms, _ = local_date_bounds(date(2025, 1, 1), date(2025, 1, 2), timezone_name="America/New_York")
+    assert new_york_start_ms != start_ms
+
+
+def test_display_timezone_name_uses_effective_timezone() -> None:
+    assert display_timezone_name("Asia/Shanghai") == "Asia/Shanghai"
+    assert display_timezone_name(None) == "UTC"
+    assert display_timezone_name("Not/A_Real_Timezone") == "UTC"
 
 
 def test_list_market_keys_returns_normalized_pairs() -> None:
@@ -165,7 +175,7 @@ def test_market_key_to_binance_symbol() -> None:
 def test_build_trade_scatter_frame_groups_net_flows_and_exchange_summary() -> None:
     fills_df = filter_fills_by_market(sample_fills(), "BTC/USDT")
 
-    frame = build_trade_scatter_frame(fills_df, interval="1d")
+    frame = build_trade_scatter_frame(fills_df, interval="1d", timezone_name="Asia/Shanghai")
 
     assert len(frame) == 2
     inflow_row = frame.loc[frame["flow_state"] == "净流入"].iloc[0]
@@ -186,19 +196,72 @@ def test_build_trade_scatter_frame_groups_net_flows_and_exchange_summary() -> No
 def test_build_trade_scatter_frame_supports_hour_buckets() -> None:
     fills_df = filter_fills_by_market(sample_fills(), "BTC/USDT")
 
-    one_hour_frame = build_trade_scatter_frame(fills_df, interval="1h")
-    four_hour_frame = build_trade_scatter_frame(fills_df, interval="4h")
-    one_year_frame = build_trade_scatter_frame(fills_df, interval="1y")
+    one_hour_frame = build_trade_scatter_frame(fills_df, interval="1h", timezone_name="Asia/Shanghai")
+    four_hour_frame = build_trade_scatter_frame(fills_df, interval="4h", timezone_name="Asia/Shanghai")
+    one_year_frame = build_trade_scatter_frame(fills_df, interval="1y", timezone_name="Asia/Shanghai")
 
     assert len(one_hour_frame) == 4
     assert len(four_hour_frame) == 2
     assert len(one_year_frame) == 1
 
 
+def test_build_trade_scatter_frame_respects_browser_timezone_for_day_buckets() -> None:
+    fills_df = pd.DataFrame(
+        [
+            {
+                "uid": "a",
+                "source_type": "binance_api",
+                "source_name": "Binance API",
+                "exchange": "binance",
+                "account_label": "main",
+                "symbol": "BTCUSDT",
+                "order_id": "1",
+                "trade_id": "1",
+                "side": "BUY",
+                "base_asset": "BTC",
+                "quote_asset": "USDT",
+                "base_qty": 0.01,
+                "price": 60000.0,
+                "quote_qty": 600.0,
+                "fee_amount": 0.0,
+                "fee_asset": "USDT",
+                "executed_at_ms": 1_735_743_600_000,  # 2025-01-01 15:00 UTC
+                "notes": "",
+            },
+            {
+                "uid": "b",
+                "source_type": "binance_api",
+                "source_name": "Binance API",
+                "exchange": "binance",
+                "account_label": "main",
+                "symbol": "BTCUSDT",
+                "order_id": "2",
+                "trade_id": "2",
+                "side": "BUY",
+                "base_asset": "BTC",
+                "quote_asset": "USDT",
+                "base_qty": 0.01,
+                "price": 61000.0,
+                "quote_qty": 610.0,
+                "fee_amount": 0.0,
+                "fee_asset": "USDT",
+                "executed_at_ms": 1_735_747_200_000,  # 2025-01-01 16:00 UTC
+                "notes": "",
+            },
+        ]
+    )
+
+    shanghai_frame = build_trade_scatter_frame(fills_df, interval="1d", timezone_name="Asia/Shanghai")
+    new_york_frame = build_trade_scatter_frame(fills_df, interval="1d", timezone_name="America/New_York")
+
+    assert len(shanghai_frame) == 2
+    assert len(new_york_frame) == 1
+
+
 def test_build_cumulative_position_series_supports_year_buckets() -> None:
     fills_df = filter_fills_by_market(sample_fills(), "BTC/USDT")
 
-    series = build_cumulative_position_series(fills_df, interval="1y")
+    series = build_cumulative_position_series(fills_df, interval="1y", timezone_name="Asia/Shanghai")
 
     assert len(series) == 1
     assert list(series["trade_count"]) == [4]
@@ -209,7 +272,7 @@ def test_build_cumulative_position_series_supports_year_buckets() -> None:
 def test_build_cumulative_position_series_tracks_running_base_qty() -> None:
     fills_df = filter_fills_by_market(sample_fills(), "BTC/USDT")
 
-    series = build_cumulative_position_series(fills_df, interval="1d")
+    series = build_cumulative_position_series(fills_df, interval="1d", timezone_name="Asia/Shanghai")
 
     assert list(series["trade_count"]) == [2, 2]
     assert [round(value, 8) for value in series["net_base_qty"]] == [0.05, -0.10]
@@ -263,7 +326,7 @@ def test_build_cumulative_position_series_accounts_for_base_asset_fees() -> None
         ]
     )
 
-    series = build_cumulative_position_series(fills_df, interval="1d")
+    series = build_cumulative_position_series(fills_df, interval="1d", timezone_name="Asia/Shanghai")
 
     assert [round(value, 8) for value in series["net_base_qty"]] == [0.99, -0.41]
     assert [round(value, 8) for value in series["cumulative_base_qty"]] == [0.99, 0.58]

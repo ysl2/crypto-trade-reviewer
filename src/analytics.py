@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 
-APP_TIMEZONE = ZoneInfo("Asia/Shanghai")
+DEFAULT_TIMEZONE = ZoneInfo("UTC")
 UTC = timezone.utc
 
 STANDARD_COLUMNS = [
@@ -33,9 +33,27 @@ STANDARD_COLUMNS = [
 TIME_BUCKETS = ("1h", "4h", "1d", "1w", "1M", "1y")
 
 
-def beijing_date_bounds(start_date: date, end_date: date) -> tuple[int, int]:
-    start_dt = datetime.combine(start_date, dt_time.min, tzinfo=APP_TIMEZONE)
-    end_dt = datetime.combine(end_date + timedelta(days=1), dt_time.min, tzinfo=APP_TIMEZONE)
+def resolve_timezone(timezone_name: str | None) -> ZoneInfo:
+    if not timezone_name:
+        return DEFAULT_TIMEZONE
+    try:
+        return ZoneInfo(timezone_name)
+    except Exception:
+        return DEFAULT_TIMEZONE
+
+
+def display_timezone_name(timezone_name: str | None) -> str:
+    return resolve_timezone(timezone_name).key
+
+
+def current_local_date(timezone_name: str | None) -> date:
+    return datetime.now(resolve_timezone(timezone_name)).date()
+
+
+def local_date_bounds(start_date: date, end_date: date, *, timezone_name: str | None) -> tuple[int, int]:
+    local_timezone = resolve_timezone(timezone_name)
+    start_dt = datetime.combine(start_date, dt_time.min, tzinfo=local_timezone)
+    end_dt = datetime.combine(end_date + timedelta(days=1), dt_time.min, tzinfo=local_timezone)
     end_dt -= timedelta(milliseconds=1)
     return (
         int(start_dt.astimezone(UTC).timestamp() * 1000),
@@ -43,16 +61,16 @@ def beijing_date_bounds(start_date: date, end_date: date) -> tuple[int, int]:
     )
 
 
-def ms_to_local_series(values: pd.Series) -> pd.Series:
-    return pd.to_datetime(values, unit="ms", utc=True).dt.tz_convert(APP_TIMEZONE)
+def ms_to_local_series(values: pd.Series, *, timezone_name: str | None) -> pd.Series:
+    return pd.to_datetime(values, unit="ms", utc=True).dt.tz_convert(resolve_timezone(timezone_name))
 
 
-def format_time_for_display(value: pd.Timestamp | datetime | None) -> str:
+def format_time_for_display(value: pd.Timestamp | datetime | None, *, timezone_name: str | None) -> str:
     if value is None or pd.isna(value):
         return ""
     ts = pd.Timestamp(value)
     if ts.tzinfo is None:
-        ts = ts.tz_localize(APP_TIMEZONE)
+        ts = ts.tz_localize(resolve_timezone(timezone_name))
     return ts.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -69,25 +87,27 @@ def _build_order_ref_series(fills_df: pd.DataFrame) -> pd.Series:
     )
 
 
-def with_display_columns(fills_df: pd.DataFrame) -> pd.DataFrame:
+def with_display_columns(fills_df: pd.DataFrame, *, timezone_name: str | None) -> pd.DataFrame:
     if fills_df.empty:
         result = fills_df.copy()
         result["order_ref"] = pd.Series(dtype="object")
-        result["executed_at_local"] = pd.Series(dtype="datetime64[ns, Asia/Shanghai]")
+        result["executed_at_local"] = pd.Series(dtype="object")
         result["executed_at_text"] = pd.Series(dtype="object")
         result["executed_at_plot"] = pd.Series(dtype="datetime64[ns]")
         return result
 
     result = fills_df.copy()
     result["order_ref"] = _build_order_ref_series(result)
-    result["executed_at_local"] = ms_to_local_series(result["executed_at_ms"])
-    result["executed_at_text"] = result["executed_at_local"].apply(format_time_for_display)
+    result["executed_at_local"] = ms_to_local_series(result["executed_at_ms"], timezone_name=timezone_name)
+    result["executed_at_text"] = result["executed_at_local"].apply(
+        lambda value: format_time_for_display(value, timezone_name=timezone_name)
+    )
     result["executed_at_plot"] = result["executed_at_local"].dt.tz_localize(None)
     return result
 
 
-def _with_inventory_columns(fills_df: pd.DataFrame) -> pd.DataFrame:
-    frame = with_display_columns(fills_df).sort_values(["executed_at_ms", "uid"]).reset_index(drop=True)
+def _with_inventory_columns(fills_df: pd.DataFrame, *, timezone_name: str | None) -> pd.DataFrame:
+    frame = with_display_columns(fills_df, timezone_name=timezone_name).sort_values(["executed_at_ms", "uid"]).reset_index(drop=True)
     if frame.empty:
         frame["inventory_buy_qty"] = pd.Series(dtype="float64")
         frame["inventory_sell_qty"] = pd.Series(dtype="float64")
@@ -119,7 +139,7 @@ def _build_exchange_summary(series: pd.Series) -> str:
     return ", ".join(f"{name}: {count}" for name, count in counts.items())
 
 
-def build_trade_scatter_frame(fills_df: pd.DataFrame, *, interval: str) -> pd.DataFrame:
+def build_trade_scatter_frame(fills_df: pd.DataFrame, *, interval: str, timezone_name: str | None) -> pd.DataFrame:
     if fills_df.empty:
         return pd.DataFrame(
             columns=[
@@ -142,7 +162,8 @@ def build_trade_scatter_frame(fills_df: pd.DataFrame, *, interval: str) -> pd.Da
             ]
         )
 
-    frame = with_display_columns(fills_df).sort_values(["executed_at_ms", "uid"]).reset_index(drop=True)
+    local_timezone = resolve_timezone(timezone_name)
+    frame = with_display_columns(fills_df, timezone_name=timezone_name).sort_values(["executed_at_ms", "uid"]).reset_index(drop=True)
     frame["bucket_start"] = _bucket_local_timestamps(frame["executed_at_plot"], interval)
 
     rows: list[dict[str, object]] = []
@@ -168,7 +189,7 @@ def build_trade_scatter_frame(fills_df: pd.DataFrame, *, interval: str) -> pd.Da
         rows.append(
             {
                 "bucket_start": bucket_start,
-                "bucket_text": format_time_for_display(pd.Timestamp(bucket_start).tz_localize(APP_TIMEZONE)),
+                "bucket_text": format_time_for_display(pd.Timestamp(bucket_start).tz_localize(local_timezone), timezone_name=timezone_name),
                 "price": price,
                 "price_min": float(group["price"].min()),
                 "price_max": float(group["price"].max()),
@@ -197,7 +218,7 @@ def build_trade_scatter_frame(fills_df: pd.DataFrame, *, interval: str) -> pd.Da
     return aggregated
 
 
-def build_cumulative_position_series(fills_df: pd.DataFrame, *, interval: str) -> pd.DataFrame:
+def build_cumulative_position_series(fills_df: pd.DataFrame, *, interval: str, timezone_name: str | None) -> pd.DataFrame:
     if fills_df.empty:
         return pd.DataFrame(
             columns=[
@@ -211,7 +232,8 @@ def build_cumulative_position_series(fills_df: pd.DataFrame, *, interval: str) -
             ]
         )
 
-    frame = _with_inventory_columns(fills_df)
+    local_timezone = resolve_timezone(timezone_name)
+    frame = _with_inventory_columns(fills_df, timezone_name=timezone_name)
     frame["cumulative_base_qty"] = frame["inventory_base_delta"].cumsum()
     frame["bucket_start"] = _bucket_local_timestamps(frame["executed_at_plot"], interval)
 
@@ -227,7 +249,7 @@ def build_cumulative_position_series(fills_df: pd.DataFrame, *, interval: str) -
         .reset_index(drop=True)
     )
     summary["bucket_text"] = summary["bucket_start"].apply(
-        lambda value: format_time_for_display(pd.Timestamp(value).tz_localize(APP_TIMEZONE))
+        lambda value: format_time_for_display(pd.Timestamp(value).tz_localize(local_timezone), timezone_name=timezone_name)
     )
     summary["executed_at_plot"] = summary["bucket_start"]
     return summary
