@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -31,6 +32,13 @@ CREATE TABLE IF NOT EXISTS fills (
 );
 """
 
+CREATE_APP_STATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS app_state (
+    state_key TEXT PRIMARY KEY,
+    state_json TEXT NOT NULL
+);
+"""
+
 
 class TradeRepository:
     def __init__(self, db_path: Path) -> None:
@@ -44,6 +52,7 @@ class TradeRepository:
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.execute(CREATE_FILLS_TABLE_SQL)
+            conn.execute(CREATE_APP_STATE_TABLE_SQL)
             conn.commit()
 
     def upsert_fills(self, fills_df: pd.DataFrame) -> tuple[int, int]:
@@ -92,3 +101,26 @@ class TradeRepository:
         with self._connect() as conn:
             conn.execute("DELETE FROM fills")
             conn.commit()
+
+    def save_app_state(self, state_key: str, payload: dict[str, object]) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_state (state_key, state_json)
+                VALUES (?, ?)
+                ON CONFLICT(state_key) DO UPDATE SET state_json = excluded.state_json
+                """,
+                (state_key, json.dumps(payload)),
+            )
+            conn.commit()
+
+    def load_app_state(self, state_key: str) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT state_json FROM app_state WHERE state_key = ?",
+                (state_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row[0])
+        return payload if isinstance(payload, dict) else None

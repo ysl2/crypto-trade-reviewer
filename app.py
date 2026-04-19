@@ -53,11 +53,12 @@ st.set_page_config(
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DB_PATH = PROJECT_ROOT / ".data" / "trades.sqlite3"
+DB_PATH = Path(os.getenv("TRADE_REVIEW_DB_PATH", str(PROJECT_ROOT / ".data" / "trades.sqlite3"))).expanduser()
 BUY_COLOR = "#0f766e"
 SELL_COLOR = "#c2410c"
 NEUTRAL_COLOR = "#7c3aed"
 INK = "#102a43"
+DEFAULT_MARKET_PAIRS = "BTCUSDT ETHUSDT SOLUSDT"
 
 BINANCE_BASE_URL = os.getenv("BINANCE_BASE_URL", "https://api.binance.com")
 OKX_BASE_URL = os.getenv("OKX_BASE_URL", "https://www.okx.com")
@@ -207,6 +208,57 @@ def refresh_state() -> None:
     st.session_state["fills_df"] = load_state()
 
 
+def import_form_state_key(exchange_id: str) -> str:
+    return f"import_form:{exchange_id}"
+
+
+def parse_saved_date(value: object, fallback: date) -> date:
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return fallback
+    if isinstance(value, date):
+        return value
+    return fallback
+
+
+def initialize_import_form_state(config: dict[str, Any], *, browser_timezone_name: str | None) -> None:
+    key_prefix = config["id"]
+    saved_state = get_repository().load_app_state(import_form_state_key(key_prefix)) or {}
+    defaults: dict[str, object] = {
+        f"{key_prefix}_api_key": saved_state.get("api_key", os.getenv(config["api_key_env"], "")),
+        f"{key_prefix}_api_secret": saved_state.get("api_secret", os.getenv(config["api_secret_env"], "")),
+        f"{key_prefix}_passphrase": saved_state.get("passphrase", os.getenv(config["passphrase_env"], "")),
+        f"{key_prefix}_base_url": saved_state.get("base_url", os.getenv(config["base_url_env"], config["default_base_url"])),
+        f"{key_prefix}_account_label": saved_state.get("account_label", config["default_account_label"]),
+        f"{key_prefix}_market_pairs": saved_state.get("market_pairs", DEFAULT_MARKET_PAIRS),
+        f"{key_prefix}_start_date": parse_saved_date(saved_state.get("start_date"), date(2017, 1, 1)),
+        f"{key_prefix}_end_date": parse_saved_date(saved_state.get("end_date"), current_local_date(browser_timezone_name)),
+    }
+    for state_key, value in defaults.items():
+        if state_key not in st.session_state:
+            st.session_state[state_key] = value
+
+
+def persist_import_form_state(config: dict[str, Any]) -> None:
+    key_prefix = config["id"]
+    payload = {
+        "api_key": str(st.session_state.get(f"{key_prefix}_api_key", "")),
+        "api_secret": str(st.session_state.get(f"{key_prefix}_api_secret", "")),
+        "passphrase": str(st.session_state.get(f"{key_prefix}_passphrase", "")),
+        "base_url": str(st.session_state.get(f"{key_prefix}_base_url", "")),
+        "account_label": str(st.session_state.get(f"{key_prefix}_account_label", "")),
+        "market_pairs": str(st.session_state.get(f"{key_prefix}_market_pairs", "")),
+        "start_date": parse_saved_date(st.session_state.get(f"{key_prefix}_start_date"), date(2017, 1, 1)).isoformat(),
+        "end_date": parse_saved_date(
+            st.session_state.get(f"{key_prefix}_end_date"),
+            current_local_date(get_browser_timezone_name()),
+        ).isoformat(),
+    }
+    get_repository().save_app_state(import_form_state_key(key_prefix), payload)
+
+
 @st.cache_data(ttl=20, show_spinner=False)
 def load_public_symbol_price(symbol: str, base_url: str) -> float:
     client = BinanceSpotReadOnlyClient(api_key="", api_secret="", base_url=base_url)
@@ -232,6 +284,13 @@ def load_live_price_status(locale: str, market_key: str) -> tuple[float | None, 
     if price_fetch_error:
         live_status = f"{live_status} {t(locale, 'live_price.failure_reason', message=price_fetch_error)}"
     return current_price, live_status
+
+
+def get_selected_interval() -> str:
+    selected_interval = str(st.session_state.get("selected_interval", "1d"))
+    if selected_interval not in TIME_BUCKETS:
+        return "1d"
+    return selected_interval
 
 
 def build_trade_figure(
@@ -374,7 +433,12 @@ def build_trade_figure(
             line_dash="dash",
             line_color="#111827",
             line_width=1.8,
-            annotation_text=t(locale, "chart.current_price_line", current_price=current_price),
+            annotation_text=t(
+                locale,
+                "chart.current_price_line",
+                market_key=market_key,
+                current_price=current_price,
+            ),
             annotation_position="top left",
         )
     fig.update_xaxes(showgrid=False, row=1, col=1)
@@ -407,17 +471,16 @@ def render_import_tab(config: dict[str, Any], *, locale: str) -> None:
     label = config["label"]
     left, right = st.columns([1.25, 1.75])
     browser_timezone_name = get_browser_timezone_name()
+    initialize_import_form_state(config, browser_timezone_name=browser_timezone_name)
 
     with left:
         api_key = st.text_input(
             f"{label} API Key",
-            value=os.getenv(config["api_key_env"], ""),
             type="password",
             key=f"{key_prefix}_api_key",
         )
         api_secret = st.text_input(
             f"{label} API Secret",
-            value=os.getenv(config["api_secret_env"], ""),
             type="password",
             key=f"{key_prefix}_api_secret",
         )
@@ -425,38 +488,34 @@ def render_import_tab(config: dict[str, Any], *, locale: str) -> None:
         if config["needs_passphrase"]:
             passphrase = st.text_input(
                 f"{label} Passphrase",
-                value=os.getenv(config["passphrase_env"], ""),
                 type="password",
                 key=f"{key_prefix}_passphrase",
             )
         base_url = st.text_input(
             t(locale, "field.api_base_url"),
-            value=os.getenv(config["base_url_env"], config["default_base_url"]),
             key=f"{key_prefix}_base_url",
         )
         account_label = st.text_input(
             t(locale, "field.account_label"),
-            value=config["default_account_label"],
             key=f"{key_prefix}_account_label",
         )
 
     with right:
         market_pairs = st.text_area(
             t(locale, "field.market_pairs"),
-            value="BTCUSDT ETHUSDT SOLUSDT",
             help=t(locale, "field.market_pairs.help"),
             key=f"{key_prefix}_market_pairs",
         )
         import_start_date = st.date_input(
             t(locale, "field.start_date"),
-            value=date(2017, 1, 1),
             key=f"{key_prefix}_start_date",
         )
         import_end_date = st.date_input(
             t(locale, "field.end_date"),
-            value=current_local_date(browser_timezone_name),
             key=f"{key_prefix}_end_date",
         )
+
+    persist_import_form_state(config)
 
     if st.button(
         t(locale, "button.import_fills", exchange=label),
@@ -648,6 +707,7 @@ else:
             options=list(TIME_BUCKETS),
             value="1d",
             format_func=lambda value: interval_label(active_locale, value),
+            key="selected_interval",
         )
 
     market_fills = filter_fills_by_market(fills_df, selected_market)
@@ -667,27 +727,31 @@ else:
         )
 
         browser_timezone_name = get_browser_timezone_name()
-        scatter_df = build_trade_scatter_frame(
-            market_fills,
-            interval=selected_interval,
-            timezone_name=browser_timezone_name,
-        )
-        position_df = build_cumulative_position_series(
-            market_fills,
-            interval=selected_interval,
-            timezone_name=browser_timezone_name,
-        )
 
         @st.fragment(run_every="30s")
         def render_live_chart() -> None:
-            current_price, live_status = load_live_price_status(active_locale, selected_market)
+            current_market = str(st.session_state.get("selected_market", selected_market))
+            current_interval = get_selected_interval()
+            current_market_fills = filter_fills_by_market(fills_df, current_market)
+            current_base_asset, current_quote_asset = split_market_key(current_market)
+            current_scatter_df = build_trade_scatter_frame(
+                current_market_fills,
+                interval=current_interval,
+                timezone_name=browser_timezone_name,
+            )
+            current_position_df = build_cumulative_position_series(
+                current_market_fills,
+                interval=current_interval,
+                timezone_name=browser_timezone_name,
+            )
+            current_price, live_status = load_live_price_status(active_locale, current_market)
             st.caption(t(active_locale, "caption.live_price", live_status=live_status))
             fig = build_trade_figure(
-                scatter_df,
-                position_df,
-                market_key=selected_market,
-                base_asset=base_asset,
-                price_unit=quote_asset,
+                current_scatter_df,
+                current_position_df,
+                market_key=current_market,
+                base_asset=current_base_asset,
+                price_unit=current_quote_asset,
                 locale=active_locale,
                 timezone_name=browser_timezone_name,
                 current_price=current_price,
@@ -695,7 +759,7 @@ else:
             st.plotly_chart(
                 fig,
                 width="stretch",
-                key=f"trade-chart-{selected_market}-{selected_interval}",
+                key=f"trade-chart-{current_market}-{current_interval}",
             )
 
         render_live_chart()
