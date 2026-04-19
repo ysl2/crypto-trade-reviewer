@@ -1,0 +1,27 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: crypto-trade-reviewer:local
+    container_name: crypto-trade-reviewer
+    ports:
+      - "8513:8513"
+    environment:
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      BINANCE_BASE_URL: ${BINANCE_BASE_URL:-https://api.binance.com}
+      OKX_API_KEY: ${OKX_API_KEY:-}
+      OKX_API_SECRET: ${OKX_API_SECRET:-}
+      OKX_API_PASSPHRASE: ${OKX_API_PASSPHRASE:-}
+      OKX_BASE_URL: ${OKX_BASE_URL:-https://www.okx.com}
+      BITGET_API_KEY: ${BITGET_API_KEY:-}
+      BITGET_API_SECRET: ${BITGET_API_SECRET:-}
+      BITGET_API_PASSPHRASE: ${BITGET_API_PASSPHRASE:-}
+      BITGET_BASE_URL: ${BITGET_BASE_URL:-https://api.bitget.com}
+      GATE_API_KEY: ${GATE_API_KEY:-}
+      GATE_API_SECRET: ${GATE_API_SECRET:-}
+      GATE_BASE_URL: ${GATE_BASE_URL:-https://api.gateio.ws/api/v4}
+    volumes:
+      - ./.data:/app/.data
+    restart: unless-stopped

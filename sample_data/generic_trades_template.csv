@@ -1,0 +1,4 @@
+executed_at,exchange,account_label,symbol,side,base_asset,quote_asset,base_qty,price,quote_qty,fee_amount,fee_asset,order_id,trade_id,notes
+2024-01-15T08:30:00Z,binance,Main,BTCUSDT,BUY,BTC,USDT,0.05000000,43000,2150,2,USDT,10001,50001,First BTC buy
+2024-02-02T14:12:00Z,kraken,Spot,ETHUSD,BUY,ETH,USD,1.20000000,2800,3360,4,USD,20001,60001,ETH accumulation
+2024-03-09T11:45:00Z,coinbase,Primary,SOLUSDC,SELL,SOL,USDC,12.00000000,145,1740,1.5,USDC,30001,70001,Trimmed SOL
