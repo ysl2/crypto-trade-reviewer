@@ -1,29 +1,41 @@
-# 成交复盘
+中文版移步： [README_CN.md](./README_CN.md)
 
-一个本地运行、只读的多交易所历史成交可视化工具。
+# Crypto Trade Reviewer
 
-它的目标很简单：把你在不同交易所的真实成交拉回来，混合到一张图里看清楚自己以前到底买了什么、卖了什么。
+<p><img src=".assets/README/img/2026-04-19-14-59-37.png" alt="" width=100% style="display: block; margin: auto;"></p>
 
-这个项目：
+[](https://github.com/user-attachments/assets/af9a9f46-c10e-49af-b5ec-99173ac01105)
 
-- 只做分析，不下单
-- 只看真实成交，不看未成交订单
-- 支持把多个交易所的同一市场混在一起看
-- 主图只保留两部分：
-  - 上面：净成交点
-  - 下面：基础币累计数量折线
+Trade Review is a local, read-only visualization tool for historical spot fills across multiple exchanges.
 
-## 现在支持什么
+The goal is simple: pull your real fills from different exchanges into one place so you can clearly see what you bought, what you sold, and how your position changed over time.
+
+This project:
+
+- is analysis-only
+- does not place orders
+- only imports executed fills
+- can mix the same market across multiple exchanges
+- keeps the chart focused on two parts:
+  - top: net fill points
+  - bottom: cumulative base-asset position line
+
+## Supported Exchanges
 
 - Binance Spot
 - OKX Spot
 - Bitget Spot
 - Gate Spot
-- 中文 / English 界面切换
-- 浏览器时区显示
-- Docker Compose 部署
 
-## 最快启动
+## Features
+
+- English / Chinese UI
+- browser timezone support
+- Docker Compose deployment
+- mixed multi-exchange market view
+- live reference price line that follows the selected market
+
+## Quick Start
 
 ```bash
 cd ~/Documents/crypto-trade-reviewer
@@ -31,118 +43,117 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-打开：
+Open:
 
 ```text
 http://localhost:8513
 ```
 
-检查服务是否正常：
+Health check:
 
 ```bash
 curl -sf http://localhost:8513/_stcore/health
 ```
 
-## 怎么用
+## How To Use
 
-1. 打开页面。
-2. 展开“交易所 API 导入”。
-3. 选择交易所。
-4. 填入只读 API Key / Secret。
-5. 输入想导入的市场，比如 `BTCUSDT ETHUSDT SOLUSDT`。
-6. 选择时间范围。
-7. 点击导入。
-8. 导入完成后，在主界面切换市场和时间粒度看图。
+1. Open the page.
+2. Expand the exchange import section.
+3. Choose an exchange tab.
+4. Enter a read-only API key and secret.
+5. Enter markets such as `BTCUSDT ETHUSDT SOLUSDT`.
+6. Pick a date range.
+7. Import fills.
+8. Switch market and time interval in the main view.
 
-## 这张图怎么看
+## How To Read The Chart
 
-上面的点：
+Top chart:
 
-- 每个点代表一个时间桶内的净成交结果
-- 价格是这个时间桶内所有成交的合并均价
-- 买卖不会分成两个点，而是合并成一个净结果点
-- 点越大，说明这个时间桶内的净成交量越大
-- 水位线是当前参考价，会跟随当前市场切换
+- each point is the net result inside one time bucket
+- point price is the merged average price for all fills in that bucket
+- buys and sells are merged into one net point instead of two separate points
+- larger points mean larger net base-asset movement
+- the horizontal price line is the current reference price for the selected market
 
-下面的线：
+Bottom chart:
 
-- 表示基础币累计数量变化
-- 买入会往上
-- 卖出会往下
+- shows cumulative base-asset quantity over time
+- buys move it up
+- sells move it down
 
-## 数据保存在哪里
+## Where Data Is Stored
 
-项目数据默认保存在：
+Project data is stored locally in:
 
 ```text
 .data/trades.sqlite3
 ```
 
-这里面会保存：
+It stores:
 
-- 导入的历史成交
-- 页面里填写过的交易所 API 表单内容
+- imported fill history
+- exchange API form values entered in the UI
 
-注意：
+Important:
 
-- 这些内容只保存在你本地
-- 当前版本的 API 凭证是本地明文保存
-- 适合个人本机使用，不适合多人共用机器
+- data stays on your local machine
+- API credentials are currently stored locally in plain text
+- this is suitable for personal local use, not for shared machines
 
-## 安全建议
+## Security Notes
 
-- 只使用只读 API
-- 不要开启交易、提现、转账权限
-- 不要把 `.env`、`.data/`、数据库文件提交到 Git
-- 不要把包含 API Key 的截图发出去
+- use read-only API keys only
+- do not enable trading, withdrawal, or transfer permissions
+- do not commit `.env`, `.data/`, database files, or screenshots with credentials
 
-仓库已经忽略这些敏感文件：
+The repo already ignores sensitive local files such as:
 
 - `.env`
 - `.data/`
 - `*.sqlite3`
 - `secrets.toml`
 
-## 常用命令
+## Common Commands
 
-查看日志：
+View logs:
 
 ```bash
 docker compose logs -f
 ```
 
-重启：
+Restart:
 
 ```bash
 docker compose restart
 ```
 
-停止：
+Stop:
 
 ```bash
 docker compose down
 ```
 
-## 常见问题
+## FAQ
 
-### 页面打不开
+### The page does not open
 
-先看：
+Check:
 
 ```bash
 docker compose ps
 curl -sf http://localhost:8513/_stcore/health
 ```
 
-### 导入后没数据
+### Import finished but no data appears
 
-这个工具不会自动抓取，必须先手动导入真实成交。
+This tool does not auto-fetch anything. You must import executed fills manually first.
 
-### 某些很早的成交拉不到
+### Very old fills are missing
 
-有些交易所官方接口本来就限制历史范围，这不是本项目额外加的限制。
+Some exchanges limit how far back their official fill APIs can go. That limit comes from the exchange, not from this project.
 
-## 本地开发运行
+## Local Development
 
 ```bash
 cd ~/Documents/crypto-trade-reviewer
@@ -152,7 +163,7 @@ pip install -r requirements.txt
 streamlit run app.py --server.address 0.0.0.0 --server.port 8513
 ```
 
-测试：
+Tests:
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/pytest -q
